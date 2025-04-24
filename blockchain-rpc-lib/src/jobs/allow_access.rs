@@ -1,8 +1,11 @@
 use crate::Result;
 use crate::context::SecureRpcContext;
 use crate::error::Error;
-use blueprint_sdk::macros::debug_job;
-use blueprint_sdk::tangle::extract::{Context, DecodedArgs, TangleResult};
+use blueprint_sdk::{
+    extract::Context,
+    macros::debug_job,
+    tangle::extract::{TangleArg, TangleResult},
+};
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
 use sp_core::crypto::AccountId32;
@@ -24,7 +27,7 @@ pub struct AllowAccessInput {
 #[debug_job]
 pub async fn handler(
     Context(ctx): Context<SecureRpcContext>,
-    DecodedArgs(input): DecodedArgs<AllowAccessInput>,
+    TangleArg(input): TangleArg<AllowAccessInput>,
 ) -> Result<TangleResult<()>> {
     // Optional: Add admin check here using ctx.admin_pair and job metadata (caller)
     // if !is_admin(&ctx, &job_metadata.caller) {

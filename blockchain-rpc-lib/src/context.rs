@@ -3,7 +3,10 @@ use crate::config::ServiceConfig;
 use crate::default_data_dir;
 use crate::error::Error;
 use crate::firewall::Firewall;
-use blueprint_sdk::common::{BlueprintEnvironment, KeystoreContext, TangleClientContext};
+use blueprint_sdk::crypto::sp_core::SpSr25519;
+use blueprint_sdk::keystore::backends::Backend;
+use blueprint_sdk::macros::context::{KeystoreContext, TangleClientContext};
+use blueprint_sdk::runner::config::BlueprintEnvironment;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sp_core::sr25519::Pair as Sr25519Pair;
@@ -24,13 +27,11 @@ pub struct SecureRpcContext {
     pub service_config: Arc<ServiceConfig>,
     pub data_dir: PathBuf,
     pub firewall: Arc<Firewall>,
-    // We keep the signer pair accessible for potential admin checks if needed
-    pub admin_pair: Option<Arc<Sr25519Pair>>,
 }
 
 impl SecureRpcContext {
     pub async fn new(env: BlueprintEnvironment, service_config: ServiceConfig) -> Result<Self> {
-        let data_dir = env.data_dir().clone().unwrap_or_else(default_data_dir);
+        let data_dir = env.data_dir.clone().unwrap_or_else(default_data_dir);
         if !data_dir.exists() {
             std::fs::create_dir_all(&data_dir)?;
         }
@@ -51,19 +52,11 @@ impl SecureRpcContext {
             }
         });
 
-        // Optionally load an admin key if configured/needed for certain jobs
-        let admin_pair = env
-            .keystore()
-            .get_secret::<Sr25519Pair>("admin") // Assumes an alias 'admin'
-            .ok()
-            .map(|p| Arc::new(p.0));
-
         Ok(Self {
             env,
             service_config,
             data_dir,
             firewall,
-            admin_pair,
         })
     }
 

@@ -6,9 +6,6 @@ pub enum Error {
     #[error("Blueprint SDK error: {0}")]
     SdkError(#[from] SdkError),
 
-    #[error("Configuration error: {0}")]
-    ConfigError(#[from] config::ConfigError),
-
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 

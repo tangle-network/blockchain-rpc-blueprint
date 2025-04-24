@@ -1,8 +1,9 @@
 use crate::Result;
 use crate::context::{SecureRpcContext, TemporaryAccessRecord};
 use crate::error::Error;
+use blueprint_sdk::extract::Context;
 use blueprint_sdk::macros::debug_job;
-use blueprint_sdk::tangle::extract::{Context, DecodedArgs, JobMetadata, TangleResult};
+use blueprint_sdk::tangle::extract::{TangleArg, TangleResult};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -18,11 +19,10 @@ pub struct PayForAccessInput {
 #[debug_job]
 pub async fn handler(
     Context(ctx): Context<SecureRpcContext>,
-    JobMetadata(meta): JobMetadata,
-    DecodedArgs(input): DecodedArgs<PayForAccessInput>,
+    TangleArg(input): TangleArg<PayForAccessInput>,
 ) -> Result<TangleResult<()>> {
-    let caller_account = meta
-        .caller
+    let caller_account = ctx
+        .caller_account()
         .ok_or_else(|| Error::InvalidJobInput("Job caller information missing".to_string()))?;
 
     if input.duration_secs == 0 {

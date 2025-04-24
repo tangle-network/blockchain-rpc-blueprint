@@ -1,8 +1,9 @@
 use crate::Result;
 use crate::context::SecureRpcContext;
 use crate::error::Error;
+use blueprint_sdk::extract::Context;
 use blueprint_sdk::macros::debug_job;
-use blueprint_sdk::tangle::extract::{Context, DecodedArgs, TangleResult};
+use blueprint_sdk::tangle::extract::{TangleArg, TangleResult};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -15,7 +16,7 @@ pub struct RegisterWebhookInput {
 #[debug_job]
 pub async fn handler(
     Context(ctx): Context<SecureRpcContext>,
-    DecodedArgs(input): DecodedArgs<RegisterWebhookInput>,
+    TangleArg(input): TangleArg<RegisterWebhookInput>,
 ) -> Result<TangleResult<()>> {
     let url = Url::parse(&input.url)
         .map_err(|e| Error::InvalidJobInput(format!("Invalid URL: {}", e)))?;

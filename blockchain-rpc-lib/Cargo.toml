@@ -44,6 +44,8 @@ url = { version = "2.5", features = ["serde"] }
 # Concurrency
 parking_lot = "0.12"
 futures = "0.3"
+dirs = "6.0.0"
+tokio-tungstenite = "0.26.2"
 
 [dev-dependencies]
 tempfile = "3"
