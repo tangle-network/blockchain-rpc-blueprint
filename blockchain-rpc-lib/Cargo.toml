@@ -34,7 +34,7 @@ reqwest = { version = "0.12", features = ["json"] }                          # F
 # Substrate/Polkadot types
 sp-core = { version = "21.0.0", default-features = false, features = ["serde"] }
 sp-runtime = { version = "24.0.0", default-features = false }
-sp-keyring = "24.0.0"                                                            # For signer types like Sr25519Pair
+sp-keyring = "39.0.0"                                                            # For signer types like Sr25519Pair
 
 # Networking & Time
 ipnetwork = { version = "0.20", features = ["serde"] }
