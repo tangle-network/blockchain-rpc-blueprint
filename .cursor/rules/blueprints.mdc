@@ -1,0 +1,904 @@
+---
+description: Building Tangle Blueprints
+globs: *.rs, *.sol
+alwaysApply: false
+---
+# Tangle Blueprint Guide
+
+## 1. What is a Tangle Blueprint?
+A Tangle Blueprint is a modular, job-executing service built on top of Substrate (Tangle) using the Blueprint SDK. It is structured similarly to a microservice with:
+
+- **Job Router**: Maps numeric job IDs to logic handlers.
+- **BlueprintRunner**: Core executor that ties together producer, consumer, router, and context.
+- **TangleProducer**: Streams finalized blocks/events from a Tangle RPC endpoint.
+- **TangleConsumer**: Signs and sends results back to the chain.
+- **Context**: Manages local state (e.g., data directory, docker containers, keystore).
+
+These services are composable and deterministic, often containerized (e.g. Docker) and can be tested using the built-in `TangleTestHarness`.
+
+---
+
+## 2. Project Skeleton
+The canonical `main.rs` structure looks like:
+
+```rust
+#[tokio::main]
+async fn main() -> Result<(), sdk::Error> {
+    let env = BlueprintEnvironment::load()?;
+
+    let signer = env.keystore().first_local::<SpSr25519>()?;
+    let pair = env.keystore().get_secret::<SpSr25519>(&signer)?;
+    let signer = TanglePairSigner::new(pair.0);
+
+    let client = env.tangle_client().await?;
+    let producer = TangleProducer::finalized_blocks(client.rpc_client.clone()).await?;
+    let consumer = TangleConsumer::new(client.rpc_client.clone(), signer);
+
+    let context = MyContext::new(env.clone()).await?;
+
+    BlueprintRunner::builder(TangleConfig::default(), env)
+        .router(Router::new()
+            .route(JOB_ID, handler.layer(TangleLayer))
+            .with_context(context))
+        .producer(producer)
+        .consumer(consumer)
+        .run()
+        .await
+}
+```
+
+---
+
+## 3. Job Composition
+### Handler Signature
+Handlers take a context and deserialized args:
+
+```rust
+pub async fn set_config(
+    Context(ctx): Context<MyContext>,
+    TangleArgs2(Optional(config_urls), origin_chain_name): TangleArgs2<
+        Optional<List<String>>,
+        String,
+    >,
+) -> Result<TangleResult<u64>> {
+```
+
+Use `TangleArg`, `TangleArgs2`, etc. for parsing input fields. Always return `TangleResult<T>`.
+
+### Event Filters
+Apply `TangleLayer` or `MatchesServiceId` to jobs to filter execution by service identity.
+
+---
+
+## 4. Context Composition
+```rust
+#[derive(Clone, TangleClientContext, ServicesContext)]
+pub struct MyContext {
+    #[config]
+    pub env: BlueprintEnvironment,
+    pub data_dir: PathBuf,
+}
+
+impl MyContext {
+    pub async fn new(env: BlueprintEnvironment) -> Result<Self> {
+        Ok(Self {
+            data_dir: env.data_dir.clone().unwrap_or_else(default_data_dir),
+            env,
+        })
+    }
+}
+```
+
+Contexts should:
+- Derive required traits for routing.
+- Contain DockerBuilder or other service-level state if needed.
+- Wrap fs, keystore, or networking state.
+
+---
+
+## 5. Job Naming & IDs
+- Job IDs: `pub const MY_JOB_ID: u64 = 0;`
+- Handler naming: `snake_case_action_target` (e.g., `spawn_indexer_local`)
+- Files: Group jobs in a `jobs` module, one file per logical task.
+- Use `#[debug_job]` macro for helpful traces.
+
+---
+
+## 6. Testing Blueprints
+Use `TangleTestHarness` to simulate a full node and runtime:
+
+```rust
+let harness = TangleTestHarness::setup(temp_dir).await?;
+let (mut test_env, service_id, _) = harness.setup_services::<1>(false).await?;
+test_env.initialize().await?;
+test_env.add_job(square.layer(TangleLayer)).await;
+test_env.start(()).await?;
+
+let call = harness.submit_job(service_id, 0, vec![InputValue::Uint64(5)]).await?;
+let result = harness.wait_for_job_execution(service_id, call).await?;
+
+harness.verify_job(&result, vec![OutputValue::Uint64(25)]);
+```
+
+Testing is composable, isolated, and persistent with `tempfile::TempDir`.
+
+---
+
+## 7. Do's and Don'ts
+✅ DO:
+- Use `BlueprintEnvironment` for config.
+- Derive all routing context traits.
+- Use `TangleLayer` for filtering.
+- Store persistent data under `data_dir` from env or use a database.
+
+❌ DON'T:
+- Never manually fetch or decode block data. Use `TangleArg` extractors.
+- Avoid naming collisions for Job IDs.
+
+# Shared Concepts for All Blueprints
+
+This guide defines the foundational patterns shared across all Blueprint modalities (Tangle, Eigenlayer, Cron, P2P). Follow these to ensure your implementation is idiomatic, composable, and testable.
+
+---
+
+## 1. Blueprint Runner Pattern
+All Blueprints are launched via `BlueprintRunner::builder(...)`. This runner:
+- Initializes the runtime.
+- Starts a producer stream.
+- Listens for jobs via the `Router`.
+- Optionally handles graceful shutdown or background tasks.
+
+```rust
+BlueprintRunner::builder(config, env)
+    .router(Router::new()
+        .route(JOB_ID, handler.layer(...))
+        .with_context(ctx))
+    .producer(...)
+    .consumer(...) // Tangle or EVM
+    .background_service(...) // optional
+    .with_shutdown_handler(...) // optional
+    .run()
+    .await?;
+```
+
+The config passed (e.g. `TangleConfig`, `EigenlayerBLSConfig`) determines how jobs are submitted to the chain—not where events are ingested from.
+
+---
+
+## 2. Router and Job Routing
+Routers map Job IDs to handler functions. Each `.route(ID, handler)` must be unique.
+
+Use `.layer(...)` to apply:
+- `TangleLayer` (standard substrate filters)
+- `FilterLayer::new(MatchesServiceId(...))` for multi-tenant service execution
+- `FilterLayer::new(MatchesContract(...))` to scope EVM jobs by contract address
+
+Use `.with_context(...)` to pass your context into jobs.
+
+```rust
+Router::new()
+    .route(SOME_JOB_ID, do_something.layer(TangleLayer))
+    .always(process_packet.layer(FilterLayer::new(MatchesContract(address!()))))
+    .with_context(MyContext { ... })
+```
+
+---
+
+## 3. Context Pattern
+All contexts must:
+- Wrap `BlueprintEnvironment` with `#[config]`
+- Derive traits like `TangleClientContext`, `ServicesContext`, `KeystoreContext` as needed
+- Optionally contain internal clients (Docker, RPC, gRPC, etc.)
+
+Example:
+```rust
+#[derive(Clone, TangleClientContext, ServicesContext)]
+pub struct MyContext {
+    #[config]
+    pub env: BlueprintEnvironment,
+    pub data_dir: PathBuf,
+    pub connection: Arc<DockerBuilder>,
+    pub signer: TanglePairSigner,
+}
+```
+
+Construction should be async:
+```rust
+impl MyContext {
+    pub async fn new(env: BlueprintEnvironment) -> Result<Self> { ... }
+}
+```
+
+---
+
+## 4. Producer + Consumer Compatibility
+Your producer and consumer determine event ingestion and message submission:
+
+| Producer Type     | Source                     | Usage Modality     |
+|------------------|----------------------------|--------------------|
+| `TangleProducer` | Finalized Substrate blocks | Tangle-only        |
+| `PollingProducer`| EVM `eth_getLogs` polling  | EVM/Tangle Hybrid  |
+| `CronJob`        | Internal time-based tick   | All modal options  |
+| `RoundBasedAdapter` | P2P message queue     | P2P/Networking/MPC  |
+
+| Consumer Type     | Role                           | Notes                  |
+|------------------|--------------------------------|-------------------------|
+| `TangleConsumer` | Submits signed jobs to Tangle  | Only for Tangle chains |
+| `EVMConsumer`    | Sends txs via Alloy wallet     | Valid in Tangle configs |
+
+🧠 **Important:** A Blueprint using `TangleConfig` may use EVM producers + consumers. The config determines *where results are sent*, not *where events come from*.
+
+---
+
+## 5. Job Signature Conventions
+Use extractors to simplify job argument handling:
+
+- `TangleArg<T>`: one field
+- `TangleArgs2<A, B>`: two fields
+- `BlockEvents`: EVM logs
+- `Context<MyContext>`: context injection
+
+Return `TangleResult<T>` or `Result<(), Error>` depending on job type.
+
+```rust
+pub async fn handler(
+    Context(ctx): Context<MyContext>,
+    TangleArg(data): TangleArg<String>,
+) -> Result<TangleResult<u64>> {
+    ...
+}
+```
+
+---
+
+## 6. Keystore and Signer Usage
+Load from `BlueprintEnvironment`:
+```rust
+let key = env.keystore().first_local::<SpEcdsa>()?;
+let secret = env.keystore().get_secret::<SpEcdsa>(&key)?;
+let signer = TanglePairSigner::new(secret.0);
+```
+
+For BLS (Eigenlayer):
+```rust
+let pubkey = ctx.keystore().first_local::<ArkBlsBn254>()?;
+let secret = ctx.keystore().expose_bls_bn254_secret(&pubkey)?.unwrap();
+let bls = BlsKeyPair::new(secret.to_string())?;
+```
+
+---
+
+## 7. Naming & Organization
+- Job IDs are declared as `pub const JOB_NAME_ID: u64 = 0;`
+- Handlers should be snake_case with suffixes (`_eigen`, `_local`, `_cron`, etc.)
+- Contexts use `PascalCaseContext` naming (e.g., `AggregatorContext`)
+- Group jobs into modules/files like `jobs/mod.rs`, `jobs/indexer.rs`, `jobs/config.rs`
+
+Use `#[debug_job]` macro to log entry and exit automatically.
+
+---
+
+## 8. Testing Conventions
+Use `TangleTestHarness` or `Anvil` + Alloy to simulate:
+- Service creation (`setup_services::<N>()`)
+- Job submission (`submit_job(...)`)
+- Execution polling (`wait_for_job_execution(...)`)
+- Result validation (`verify_job(...)`)
+
+For Eigenlayer:
+- Use `cast` CLI or Anvil state
+- Watch logs via Alloy `watch_logs`
+- Load contracts with `sol!` macro bindings
+
+---
+
+## 9. Don'ts
+❌ Never use a `TangleConsumer`, `TangleProducer` outside of a Tangle specific blueprint.
+
+# Blueprint Networking SDK
+
+This document explains how to use the Blueprint SDK’s networking primitives to integrate libp2p-based peer-to-peer messaging into any Tangle or Eigenlayer Blueprint. It focuses on instantiating the networking layer in production contexts, configuring allowed keys from multiple environments, and composing custom P2P services.
+
+---
+
+## 1. Networking Overview
+
+The Blueprint SDK supports P2P communication via:
+- `NetworkService` — manages the network lifecycle
+- `NetworkServiceHandle` — used in jobs/contexts to send/receive messages
+- `NetworkConfig` — initializes node identity, protocol name, allowed keys
+- `AllowedKeys` — limits which nodes can connect
+
+The networking stack is libp2p-native and works in Tangle, Eigenlayer, or custom Blueprint deployments.
+
+---
+
+## 2. Integrating Networking into a Context
+
+### Context Layout
+```rust
+#[derive(Clone, KeystoreContext)]
+pub struct MyContext {
+    #[config]
+    pub config: BlueprintEnvironment,
+    pub network_backend: NetworkServiceHandle,
+    pub identity: sp_core::ecdsa::Pair, // or other signing key
+}
+```
+
+### Context Constructor
+```rust
+pub async fn new(config: BlueprintEnvironment) -> Result<Self> {
+    let allowed_keys = get_allowed_keys(&config).await?;
+    let network_config = config.libp2p_network_config("/my/protocol/1.0.0")?;
+    let network_backend = config.libp2p_start_network(network_config.clone(), allowed_keys)?;
+
+    Ok(Self {
+        config,
+        network_backend,
+        identity: network_config.instance_key_pair.0.clone(),
+    })
+}
+```
+
+---
+
+## 3. Computing Allowed Keys
+
+### ✅ From Tangle
+```rust
+let operators = config.tangle_client().await?.get_operators().await?;
+let allowed_keys = AllowedKeys::InstancePublicKeys(
+    operators.values().map(InstanceMsgPublicKey).collect()
+);
+```
+
+### ✅ From Eigenlayer AVS
+```rust
+let client = EigenlayerClient::new(config.clone());
+let (addrs, pubkeys) = client
+    .query_existing_registered_operator_pub_keys(start_block, end_block)
+    .await?;
+
+let keys = pubkeys
+    .into_iter()
+    .filter_map(|k| k.bls_public_key)
+    .map(|pk| {
+        let ark_pk = blueprint_crypto::bn254::ArkBlsBn254::Public::deserialize_compressed(&pk)?;
+        InstanceMsgPublicKey::from_bn254(&ark_pk)
+    })
+    .collect();
+
+let allowed_keys = AllowedKeys::InstancePublicKeys(keys);
+```
+
+---
+
+## 4. Sending and Receiving Messages
+
+### Sending
+```rust
+let routing = MessageRouting {
+    message_id: 1,
+    round_id: 0,
+    sender: ParticipantInfo::from(identity),
+    recipient: None, // Gossip
+};
+
+context.network_backend.send(routing, message_bytes)?;
+```
+
+### Receiving
+```rust
+if let Some(msg) = context.network_backend.next_protocol_message() {
+    // Deserialize and handle
+}
+```
+
+Use `bincode` or similar for message serialization.
+
+---
+
+## 5. Notes on Identity
+
+- Identity for `NetworkConfig` comes from the `instance_key_pair` field
+- The `InstanceMsgPublicKey` must match one used in the `AllowedKeys`
+- Supported key types: `SpEcdsa`, `ArkBlsBn254`, others via `KeyType` trait
+
+---
+
+## 6. Best Practices
+
+✅ DO:
+- Use context-level networking — never instantiate inside jobs
+- Set unique protocol ID per service (`/app/version/...`)
+- Use canonical serialization formats
+
+❌ DON’T:
+- Use test keys or unverified peer identities in production
+- Recreate the network multiple times per job instance
+
+---
+
+## 7. Use Cases
+- Gossip consensus messages across validator peers
+- Coordinate operator stake verification or rewards
+- Build secure MPC jobs across ECDSA/BLS keys
+- Trigger tasks from P2P rather than onchain events
+
+---
+
+For round-based coordination, see the `round-based.md` doc.
+
+# Round-Based Protocols with Blueprint SDK
+
+This guide describes how to design and execute round-based multiparty protocols using the `round_based` crate and Blueprint SDK’s `RoundBasedNetworkAdapter`. These protocols are ideal for DKG, randomness generation, keygen, signing, or any interactive consensus.
+
+---
+
+## 1. Key Concepts
+
+- **MpcParty**: Abstraction over a network-connected party
+- **RoundsRouter**: Drives round orchestration, ensures all inputs are gathered
+- **RoundInput**: Declares message shape and broadcast/point-to-point semantics
+- **ProtocolMessage**: Trait to derive on all messages (requires `Serialize`, `Deserialize`)
+- **MsgId**: Tracks individual messages for blame
+
+---
+
+## 2. Define Protocol Messages
+
+```rust
+#[derive(Clone, Debug, PartialEq, ProtocolMessage, Serialize, Deserialize)]
+pub enum Msg {
+    Commit(CommitMsg),
+    Decommit(DecommitMsg),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommitMsg {
+    pub commitment: [u8; 32],
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DecommitMsg {
+    pub randomness: [u8; 32],
+}
+```
+
+---
+
+## 3. Set Up the Router
+
+```rust
+let mut router = RoundsRouter::<Msg>::builder();
+let round1 = router.add_round(RoundInput::<CommitMsg>::broadcast(i, n));
+let round2 = router.add_round(RoundInput::<DecommitMsg>::broadcast(i, n));
+let mut router = router.listen(incoming); // from MpcParty::connected(...)
+```
+
+---
+
+## 4. Send and Receive
+
+```rust
+outgoing.send(Outgoing::broadcast(Msg::Commit(CommitMsg { ... }))).await?;
+let commits = router.complete(round1).await?;
+```
+
+You may access indexed results and verify per party.
+
+---
+
+## 5. Connect to Network
+
+```rust
+let network = RoundBasedNetworkAdapter::new(
+    context.network_backend.clone(),
+    local_index,             // your own party index
+    indexed_keys,            // PartyIndex → InstanceMsgPublicKey
+    "round-protocol-instance-id"
+);
+let MpcParty { delivery, .. } = MpcParty::connected(network).into_party();
+let (incoming, outgoing) = delivery.split();
+```
+
+You now have `incoming` and `outgoing` channels to wire into your protocol.
+
+---
+
+## 6. Simulating the Protocol
+
+For local dev:
+```rust
+round_based::sim::run_with_setup(parties, |i, party, rng| async move {
+    protocol_fn(party, i, n, rng).await
+})
+.expect_ok()
+.expect_eq();
+```
+
+---
+
+## 7. Production Pattern
+Use the adapter in a background task or job with:
+- `RoundBasedNetworkAdapter`
+- Indexed `InstanceMsgPublicKey`s
+- State machine logic coordinating rounds
+- Optional blame tracking
+
+---
+
+## 8. Blame Tracking
+To identify misbehavior:
+```rust
+pub struct Blame {
+    pub guilty_party: PartyIndex,
+    pub commitment_msg: MsgId,
+    pub decommitment_msg: MsgId,
+}
+```
+
+If `commit != sha256(decommit)`, blame the peer and continue protocol.
+
+---
+
+## 9. Error Handling
+Use rich error types to pinpoint issues:
+```rust
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("failed to send commitment")]
+    Round1Send(#[source] SendError),
+    #[error("decommitment mismatch")]
+    InvalidDecommitment { guilty: Vec<Blame> },
+    // ...
+}
+```
+
+---
+
+## 10. Use Cases
+- Randomness beacons
+- DKG or key resharing
+- Aggregated signing
+- Verifiable shuffles
+- Voting and consensus schemes
+
+---
+
+Use this guide to scaffold secure, blame-attributing, peer-verifiable round-based protocols.
+
+# Solidity Blueprint contract
+
+You can override these base methods to implement all things related to the onchain functionality of the Blueprint dealing with job requests, service creation, approvals, rejections, job calls, job result submissions (where we verify jobs)
+
+```solidity
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/utils/structs/EnumerableSet.sol";
+
+import "src/Permissions.sol";
+import "src/IBlueprintServiceManager.sol";
+
+/// @title BlueprintServiceManagerBase
+/// @author Tangle Network Team
+/// @dev This contract acts as a manager for the lifecycle of a Blueprint Instance,
+/// facilitating various stages such as registration, service requests, job execution,
+/// and job result handling. It is designed to be used by the service blueprint designer
+/// (gadget developer) and integrates with the RootChain for permissioned operations.
+/// Each function serves as a hook for different lifecycle events, and reverting any
+/// of these functions interrupts the process flow.
+contract BlueprintServiceManagerBase is IBlueprintServiceManager, RootChainEnabled {
+    using EnumerableSet for EnumerableSet.AddressSet;
+    using Assets for Assets.Asset;
+    using Assets for address;
+    using Assets for bytes32;
+
+    /// @dev The Current Blueprint Id
+    uint256 public currentBlueprintId;
+
+    /// @dev The address of the owner of the blueprint
+    address public blueprintOwner;
+
+    /// @dev a mapping between service id and permitted payment assets.
+    /// @dev serviceId => EnumerableSet of permitted payment assets.
+    /// @notice This mapping is used to store the permitted payment assets for each service.
+    mapping(uint64 => EnumerableSet.AddressSet) private _permittedPaymentAssets;
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onBlueprintCreated(uint64 blueprintId, address owner, address mbsm) external virtual onlyFromRootChain {
+        currentBlueprintId = blueprintId;
+        blueprintOwner = owner;
+        masterBlueprintServiceManager = mbsm;
+    }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onRegister(
+        ServiceOperators.OperatorPreferences calldata operator,
+        bytes calldata registrationInputs
+    )
+        external
+        payable
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onUnregister(ServiceOperators.OperatorPreferences calldata operator) external virtual onlyFromMaster { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onUpdatePriceTargets(ServiceOperators.OperatorPreferences calldata operator)
+        external
+        payable
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onRequest(ServiceOperators.RequestParams calldata params) external payable virtual onlyFromMaster { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onApprove(
+        ServiceOperators.OperatorPreferences calldata operator,
+        uint64 requestId,
+        uint8 restakingPercent
+    )
+        external
+        payable
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onReject(
+        ServiceOperators.OperatorPreferences calldata operator,
+        uint64 requestId
+    )
+        external
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onServiceInitialized(
+        uint64 requestId,
+        uint64 serviceId,
+        address owner,
+        address[] calldata permittedCallers,
+        uint64 ttl
+    )
+        external
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onJobCall(
+        uint64 serviceId,
+        uint8 job,
+        uint64 jobCallId,
+        bytes calldata inputs
+    )
+        external
+        payable
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onJobResult(
+        uint64 serviceId,
+        uint8 job,
+        uint64 jobCallId,
+        ServiceOperators.OperatorPreferences calldata operator,
+        bytes calldata inputs,
+        bytes calldata outputs
+    )
+        external
+        payable
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onServiceTermination(uint64 serviceId, address owner) external virtual onlyFromMaster { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onUnappliedSlash(
+        uint64 serviceId,
+        bytes calldata offender,
+        uint8 slashPercent
+    )
+        external
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onSlash(
+        uint64 serviceId,
+        bytes calldata offender,
+        uint8 slashPercent
+    )
+        external
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function canJoin(
+        uint64 serviceId,
+        ServiceOperators.OperatorPreferences calldata operator
+    )
+        external
+        view
+        virtual
+        onlyFromMaster
+        returns (bool allowed)
+    {
+        return false;
+    }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onOperatorJoined(
+        uint64 serviceId,
+        ServiceOperators.OperatorPreferences calldata operator
+    )
+        external
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function canLeave(
+        uint64 serviceId,
+        ServiceOperators.OperatorPreferences calldata operator
+    )
+        external
+        view
+        virtual
+        onlyFromMaster
+        returns (bool allowed)
+    {
+        return false;
+    }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function onOperatorLeft(
+        uint64 serviceId,
+        ServiceOperators.OperatorPreferences calldata operator
+    )
+        external
+        virtual
+        onlyFromMaster
+    { }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function querySlashingOrigin(uint64) external view virtual returns (address slashingOrigin) {
+        return address(this);
+    }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function queryDisputeOrigin(uint64) external view virtual returns (address disputeOrigin) {
+        return address(this);
+    }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function queryDeveloperPaymentAddress(uint64)
+        external
+        view
+        virtual
+        returns (address payable developerPaymentAddress)
+    {
+        return payable(blueprintOwner);
+    }
+
+    /// @inheritdoc IBlueprintServiceManager
+    function queryIsPaymentAssetAllowed(
+        uint64 serviceId,
+        Assets.Asset calldata asset
+    )
+        external
+        view
+        virtual
+        returns (bool isAllowed)
+    {
+        return _isAssetPermitted(serviceId, asset);
+    }
+
+    /**
+     * @notice Permits a specific asset for a given service.
+     * @dev Adds the asset to the set of permitted payment assets based on its kind.
+     * @param serviceId The ID of the service for which the asset is being permitted.
+     * @param asset The asset to be permitted, defined by its kind and data.
+     */
+    function _permitAsset(uint64 serviceId, Assets.Asset calldata asset) internal virtual returns (bool added) {
+        address assetAddress = asset.toAddress();
+        bool _added = _permittedPaymentAssets[serviceId].add(assetAddress);
+        return _added;
+    }
+
+    /**
+     * @notice Revokes a previously permitted asset for a given service.
+     * @dev Removes the asset from the set of permitted payment assets based on its kind.
+     * @param serviceId The ID of the service for which the asset is being revoked.
+     * @param asset The asset to be revoked, defined by its kind and data.
+     */
+    function _revokeAsset(uint64 serviceId, Assets.Asset calldata asset) internal virtual returns (bool removed) {
+        address assetAddress = asset.toAddress();
+        bool _removed = _permittedPaymentAssets[serviceId].remove(assetAddress);
+        return _removed;
+    }
+
+    /**
+     * @notice Clears all permitted assets for a given service.
+     * @dev Iterates through the set of permitted assets and removes each one.
+     * @param serviceId The ID of the service for which permitted assets are being cleared.
+     */
+    function _clearPermittedAssets(uint64 serviceId) internal virtual returns (bool cleared) {
+        EnumerableSet.AddressSet storage permittedAssets = _permittedPaymentAssets[serviceId];
+        uint256 length = permittedAssets.length();
+        while (length > 0) {
+            address assetAddress = permittedAssets.at(0);
+            permittedAssets.remove(assetAddress);
+            length = permittedAssets.length();
+        }
+
+        // The set should be empty after clearing all permitted assets.
+        return permittedAssets.length() == 0;
+    }
+
+    /**
+     * @notice Retrieves all permitted assets for a given service as an array of addresses.
+     * @dev Converts the EnumerableSet of permitted assets to a dynamic array of addresses.
+     * @param serviceId The ID of the service for which permitted assets are being retrieved.
+     * @return assets An array of addresses representing the permitted assets.
+     */
+    function _getPermittedAssetsAsAddresses(uint64 serviceId) internal view virtual returns (address[] memory) {
+        EnumerableSet.AddressSet storage permittedAssets = _permittedPaymentAssets[serviceId];
+        address[] memory assets = new address[](permittedAssets.length());
+        for (uint256 i = 0; i < permittedAssets.length(); i++) {
+            assets[i] = permittedAssets.at(i);
+        }
+        return assets;
+    }
+
+    /**
+     * @notice Retrieves all permitted assets for a given service as an array of Asset structs.
+     * @dev Converts the EnumerableSet of permitted assets to a dynamic array of ServiceOperators.Asset.
+     * @param serviceId The ID of the service for which permitted assets are being retrieved.
+     * @return assets An array of ServiceOperators.Asset structs representing the permitted assets.
+     */
+    function _getPermittedAssets(uint64 serviceId) internal view virtual returns (Assets.Asset[] memory) {
+        EnumerableSet.AddressSet storage permittedAssets = _permittedPaymentAssets[serviceId];
+        Assets.Asset[] memory assets = new Assets.Asset[](permittedAssets.length());
+        for (uint256 i = 0; i < permittedAssets.length(); i++) {
+            address assetAddress = permittedAssets.at(i);
+            if (assetAddress == address(0)) {
+                continue;
+            }
+            assets[i] = assetAddress.toAsset();
+        }
+        return assets;
+    }
+
+    /**
+     * @notice Checks if a specific asset is permitted for a given service.
+     * @dev Determines if the asset is contained within the set of permitted payment assets based on its kind.
+     * @param serviceId The ID of the service to check.
+     * @param asset The asset to check, defined by its kind and data.
+     * @return isAllowed Boolean indicating whether the asset is permitted.
+     */
+    function _isAssetPermitted(uint64 serviceId, Assets.Asset calldata asset) internal view virtual returns (bool) {
+        // Native assets are always permitted.
+        if (asset.isNative()) {
+            return true;
+        } else {
+            address assetAddress = asset.toAddress();
+            return _permittedPaymentAssets[serviceId].contains(assetAddress);
+        }
+    }
+}
+```

@@ -1,0 +1,38 @@
+[package]
+name = "blockchain-rpc-bin"
+version = { workspace = true }
+edition = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+readme = { workspace = true }
+categories = { workspace = true }
+keywords = { workspace = true }
+
+[[bin]]
+name = "secure-rpc-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Workspace dependencies
+blockchain-rpc-lib = { path = "../blockchain-rpc-lib" }
+tokio = { workspace = true, features = ["full"] }
+color-eyre = { workspace = true }
+tracing-subscriber = { workspace = true }
+tracing = { workspace = true }
+
+# External dependencies
+eyre = "0.6"
+
+[build-dependencies]
+blockchain-rpc-lib.workspace = true
+blueprint-sdk = { workspace = true, features = ["macros", "build"] }
+[package.metadata.blueprint]
+sources = [
+    { type = "Native", owner = "tangle-network", repo = "blockchain-rpc", tag = "0.1.0", binaries = [
+        { arch = "Amd64", os = "Linux", name = "amd64-linux-blockchain-rpc-gadget" },
+        { arch = "Arm64", os = "Linux", name = "arm64-linux-blockchain-rpc-gadget" },
+    ] },
+    { type = "Container", registry = "docker.io", image = "tangle-network/blockchain-rpc", tag = "0.1.0" },
+]
