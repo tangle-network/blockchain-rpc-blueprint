@@ -10,6 +10,7 @@ use blueprint_sdk::runner::config::BlueprintEnvironment;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sp_core::sr25519::Pair as Sr25519Pair;
+use sp_runtime::AccountId32;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::time::interval;
@@ -27,6 +28,7 @@ pub struct SecureRpcContext {
     pub service_config: Arc<ServiceConfig>,
     pub data_dir: PathBuf,
     pub firewall: Arc<Firewall>,
+    pub admin_pair: Option<Arc<Sr25519Pair>>,
 }
 
 impl SecureRpcContext {
@@ -57,6 +59,7 @@ impl SecureRpcContext {
             service_config,
             data_dir,
             firewall,
+            admin_pair: None,
         })
     }
 

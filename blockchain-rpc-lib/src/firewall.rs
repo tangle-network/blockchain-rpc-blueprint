@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use ipnetwork::IpNetwork;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use sp_core::crypto::AccountId32;
+use sp_runtime::AccountId32;
 use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::sync::Arc;

@@ -29,12 +29,7 @@ hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tower-http = { version = "0.5", features = ["trace", "cors", "set-header"] }
-reqwest = { version = "0.12", features = ["json"] }                          # For webhooks
-
-# Substrate/Polkadot types
-sp-core = { version = "21.0.0", default-features = false, features = ["serde"] }
-sp-runtime = { version = "24.0.0", default-features = false }
-sp-keyring = "24.0.0"                                                            # For signer types like Sr25519Pair
+reqwest = { version = "0.12", features = ["json"] }
 
 # Networking & Time
 ipnetwork = { version = "0.20", features = ["serde"] }
@@ -46,6 +41,9 @@ parking_lot = "0.12"
 futures = "0.3"
 dirs = "6.0.0"
 tokio-tungstenite = "0.26.2"
+
+# New dependencies
+config = { version = "0.14", features = ["toml", "env"] }
 
 [dev-dependencies]
 tempfile = "3"

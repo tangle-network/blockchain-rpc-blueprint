@@ -2,7 +2,7 @@ use crate::Result;
 use crate::error::Error;
 use ipnetwork::IpNetwork;
 use serde::{Deserialize, Serialize};
-use sp_core::crypto::AccountId32;
+use sp_runtime::AccountId32;
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
@@ -53,12 +53,12 @@ fn default_request_timeout_secs() -> u64 {
 
 impl ServiceConfig {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let config = config::Config::builder()
-            .add_source(config::File::from(path.as_ref()))
-            // Add environment variable overrides, e.g., SECURE_RPC_RPC__LISTEN_ADDR
-            .add_source(config::Environment::with_prefix("SECURE_RPC").separator("__"))
-            .build()?;
-        let service_config: ServiceConfig = config.try_deserialize()?;
+        let config = ::config::Config::builder()
+            .add_source(::config::File::from(path.as_ref()))
+            .add_source(::config::Environment::with_prefix("SECURE_RPC").separator("__"))
+            .build()
+            .map_err(Error::ConfigError)?;
+        let service_config: ServiceConfig = config.try_deserialize().map_err(Error::ConfigError)?;
         Ok(service_config)
     }
 }
